@@ -1130,7 +1130,7 @@ for segment in seg_range:
     pl.view_isometric()
 
     # Save the plot as a PNG
-    ps="Eigen_"+str(segment+1)+".png"
+    ps="Eigen_"+str(segment)+".png"
     pl.screenshot(ps)
     pl.show() 
     # Close the plotter to free memory
@@ -1150,7 +1150,7 @@ u_stress.interpolate(fexpr1)
 
 
 n_components=6
-for i in range(n_components):
+for i in range(6):
     stress_xx_values = u_stress.x.array[i::n_components]  # Extract every 6th value (σ_xx) 
     pyvista.start_xvfb()
     u_topology, u_cell_types, u_geometry=dolfinx.plot.vtk_mesh(VV)
@@ -1162,7 +1162,7 @@ for i in range(n_components):
 
     # Set up the plotter
     u_plotter = pyvista.Plotter()
-    u_plotter.add_mesh(grid, scalar_bar_args={"title": "Stress_Resultant "+str(i+1)},cmap="coolwarm",)
+    u_plotter.add_mesh(grid, scalar_bar_args={"title": "Stress_"+str(i+1)+":-Segment_id:"+str(int(segment))},cmap="coolwarm",)
     u_plotter.show_axes()
     u_plotter.add_text(
         f"Local Stress {i+1}",
@@ -1171,7 +1171,7 @@ for i in range(n_components):
    # u_plotter.view_yz()  # 2D view; adjust for 3D if needed
     u_plotter.show()  
   #  u_plotter.show(interactive=True)  # Opens an interactive window
-    u_plotter.screenshot("11_Stress_Resultant"+str(i+1)+'.png')  # Save as PNG
+    u_plotter.screenshot("Stress_"+str(i+1)+"Segment_id:"+str(int(segment))+'.png')  # Save as PNG
 
     print("Plot saved as .png")
 
@@ -1190,7 +1190,7 @@ for i in range(n_components):
 
     # Set up the plotter
     u_plotter = pyvista.Plotter()
-    u_plotter.add_mesh(grid, scalar_bar_args={"title": "Strain_Resultant "+str(i+1)},cmap="coolwarm",)
+    u_plotter.add_mesh(grid, scalar_bar_args={"title": "Strain_"+str(i+1)+":-Segment_id:"+str(int(segment))},cmap="coolwarm",)
     u_plotter.show_axes()
     u_plotter.add_text(
         f"Local Strain {i+1}",
@@ -1199,31 +1199,7 @@ for i in range(n_components):
    # u_plotter.view_yz()  # 2D view; adjust for 3D if needed
     u_plotter.show()  
   #  u_plotter.show(interactive=True)  # Opens an interactive window
-    u_plotter.screenshot("0_Strain_Resultant"+str(i+1)+'.png')  # Save as PNG
+    u_plotter.screenshot("Strain_"+str(i+1)+"Segment_id:"+str(int(segment))+'.png')  # Save as PNG
 
     print("Plot saved as .png")
-
-#################################################################
-
-# Dehomogenization
-#seg_i,seg_f=0,10
-#seg_range=np.linspace(seg_i,seg_f,seg_f-seg_i+1)
-
-#for seg_id in seg_range:
- #   seg_id=int(seg_id)
-  #  V0,V1s=V0_all[seg_id],V1s_all[seg_id]
-  #  V,VV  =V_all[seg_id] ,VV_all[seg_id]
-    
-  #  entity_mapl,entity_mapr=leftface_all[seg_id], rightface_all[seg_id]
-  #  x,dx=x_all[seg_id], dx_all[seg_id]
-  #  Deff_srt=taper_timo[seg_id]
-    
-  #  Comp_srt=np.linalg.inv(Deff_srt)
-
-  #  rf=[beam_f[seg_id][k][1] for k in range(6)]
-
-  #  print(' Eigen buckling analysis: Segment-', seg_id+1)
- #   print('\n BeamDyn Reaction Force \n')
- #   for i in range(6): print(beam_f[seg_id][i])
-    
-
+    print("Plot saved as .png")
