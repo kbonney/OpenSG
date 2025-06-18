@@ -1,174 +1,402 @@
+
 # Initialization of libraries
 from mpi4py import MPI
 import numpy as np
 import dolfinx
-import basix
-from dolfinx.fem import form, petsc, Function, functionspace, apply_lifting, set_bc, locate_dofs_topological
-from ufl import TrialFunction, TestFunction, inner, lhs, rhs, as_tensor, dot
+from dolfinx.fem import (
+    form,
+    petsc,
+    Function,
+    apply_lifting,
+    set_bc,
+    locate_dofs_topological,
+)
+from ufl import rhs, as_tensor, dot
 from scipy.sparse import csr_matrix
 import petsc4py.PETSc
 from dolfinx.fem.petsc import assemble_matrix
 import opensg
 import scipy
 
-from mpi4py import MPI
-import ufl
-
 
 ### ABD matrix computation
 # @profile
 # NOTE can pass in thick[ii], nlay[ii], etc instead of the dictionaries
-def compute_ABD_matrix(thick, nlay, angle, mat_names, material_database):
-    """Compute the ABD matrix for a composite layup structure
 
-    Constructs a local stiffness matrix for a composite laminate
-    by assembling the contributions from multiple layers.
-
-    Parameters
-    ----------
-    ii : _type_
-        _description_
-    thick : _type_
-        _description_
-    nlay : _type_
-        _description_
-    material_parameters : _type_
-        _description_
-    matid : _type_
-        _description_
-
-    Returns
-    -------
-    _type_
-        _description_
+# Generate ABD matrix (Plate model)
+# def compute_timo_boun(ABD, mesh, subdomains, frame, nullspace, sub_nullspace, nphases):
+    
+def compute_timo_boun(ABD, boundary_submeshdata, nh):
     """
+    Solve EB and Timo model for boundary mesh.
+    The output fluctuating functions V0 and V1s are used dirichilet boundary constraints
 
-    ## 1D mesh generation
-    # initialization
-    deg = 2
-    cell = ufl.Cell("interval")
-    elem = basix.ufl.element("Lagrange", "interval", 1, shape = (3,))
-    domain = ufl.Mesh(elem)
+    Parameters:
+        mesh_l: Left Boundary mesh
+        subdomains_l:  Left Boundary subdomains (layup information)
+        frame_l: local orientation frame (DG space)
+    Returns:
+        D_eff (np array): [4,4] !Boundary EB Stiffness matrix
+        Deff_srt (np array):[6,6] !Boundary Timoshenko Stiffness matrix
+        V0 (np array): [ndofs_leftmesh,4] !Boundary fluctuating function solutions after solving load cases (useful in WB segment EB)
+        V1s (np array):[ndofs_leftmesh,4] !Boundary fluctuating function solutions after solving load cases (useful in WB segment Timoshenko Stiffness)
+    """
+    boundary_mesh = boundary_submeshdata["mesh"]
+    boundary_subdomains = boundary_submeshdata["subdomains"]
+    boundary_frame = boundary_submeshdata["frame"]
+    # frame override:
+    boundary_frame = opensg.local_frame_1D(boundary_mesh)
 
-    # nodes (1D SG)
-    th, s = [0], 0  # Reference starting point
-    for k in thick:
-        s = s - k  # Add the thickness of each layer
-        th.append(s)
-    points = np.array(th)
-    
-    # elements
-    cell = []
-    for k in range(nlay):
-        cell.append([k, k + 1])
-    cellss = np.array(cell)
-    
-    # Create mesh object
-    dom = dolfinx.mesh.create_mesh(MPI.COMM_WORLD, cellss, points, domain)
-    num_cells = dom.topology.index_map(dom.topology.dim).size_local
-    cells = np.arange(num_cells, dtype = np.int32)
-    
-    #
-    # Note: For a layup like layup1: containing 3 layers:
-    # we defined 1D mesh with 3 elements and make each element a seperate subdomain(where integration is computed by *dx(i)
-    # for subdomain i) using cells-[0,1,2]
-    
-    # assigning each element as subdomain
-    subdomain = dolfinx.mesh.meshtags(dom, dom.topology.dim, cells, cells)
-    x, dx = ufl.SpatialCoordinate(dom), ufl.Measure("dx")(domain = dom, subdomain_data = subdomain)
-    gamma_e = opensg.compute_utils.create_gamma_e(x)
+    nphases = len(ABD)
 
-    nphases = len(cells)
+    e, V_l, dv, v_, x, dx = opensg.local_boun(
+        boundary_mesh, boundary_frame, boundary_subdomains
+    )
+    boundary_mesh.topology.create_connectivity(1, 1)
+    V0, Dle, Dhe, D_ee, V1s = opensg.initialize_array(V_l)
+    nullspace_l = opensg.compute_nullspace(V_l)
+    #   A_l=A_mat(e,x,dx,nullspace(V_l),v_,dv,mesh_l)
+    # Compute A_mat
+    F2 = sum(
+        [
+            dot(
+                dot(as_tensor(ABD[i]), opensg.gamma_h(e, x, dv)),
+                opensg.gamma_h(e, x, v_),
+            )
+            * dx(i)
+            for i in range(nphases)
+        ]
+    )
+    ff = opensg.deri_constraint(dv, v_, boundary_mesh, nh)
+    A_l = assemble_matrix(form(F2 + ff))
+    A_l.assemble()
+    A_l.setNullSpace(nullspace_l)
 
-    # Creating FE function Space
-    V = functionspace(dom, basix.ufl.element("CG", "interval", deg, shape = (3,)))
-    u, v = TrialFunction(V), TestFunction(V)
-    
-    # Weak form of energy
-    F2 = 0
-    for j in range(nphases):
-        mat_name = mat_names[j]
-        material_props = material_database[mat_name]
-        theta = angle[j]
-        sigma_val = opensg.compute_utils.sigma(u, material_props, theta, Eps = gamma_e[:,0])[0]
-        inner_val = inner(sigma_val, opensg.compute_utils.eps(v)[0])
-        F2 += inner_val * dx(j)
-    
-    # lhs gives left hand side of weak form : coeff matrix here
-    A = petsc.assemble_matrix(form(lhs(F2)))  
-    A.assemble()
-    null = opensg.compute_utils.compute_nullspace(V)
-    A.setNullSpace(null)  # Set the nullspace
-    xx = 3 * V.dofmap.index_map.local_range[1]  # total dofs
-    
-    # Initialization
-    V0, Dhe, D_ee = np.zeros((xx, 6)), np.zeros((xx, 6)), np.zeros((6, 6))
-
-    # Assembly
-    for p in range(6):
+    gamma_e = opensg.gamma_e(e, x)
+    for p in range(4):
         Eps = gamma_e[:, p]
-        
-        # weak form
-        F2 = 0
-        for j in range(nphases):
-            mat_name = mat_names[j]
-            material_props = material_database[mat_name]
-            theta = angle[j]
-            sigma_val = opensg.compute_utils.sigma(u, material_props, theta, Eps)[0]
-            inner_val = inner(sigma_val, opensg.compute_utils.eps(v)[0])
-            F2 += inner_val * dx(j)
-            
-        # F2 = sum([inner(sigma(u, i, Eps)[0], eps(v)[0]) * dx(i) for i in range(nphases)])
-        
-        # rhs is used for getting right hand side of Aw = F; (which is F here)
-        F = petsc.assemble_vector(form(rhs(F2)))
-        F.ghostUpdate(addv = petsc4py.PETSc.InsertMode.ADD, mode = petsc4py.PETSc.ScatterMode.REVERSE)
-        null.remove(F)  # Orthogonalize F to the null space of A^T
-        w = opensg.compute_utils.solve_ksp(A, F, V)
-        Dhe[:, p] = F[:]  # Dhe matrix formation
-        V0[:, p] = w.vector[:]  # V0 matrix formation
-    
-    # NOTE: fixed..
-    D1 = np.matmul(V0.T, -Dhe)  # Additional information matrix
+        F2 = sum(
+            [
+                dot(dot(as_tensor(ABD[i]), Eps), opensg.gamma_h(e, x, v_)) * dx(i)
+                for i in range(nphases)
+            ]
+        )
+        r_he = form(rhs(F2))
+        F_l = petsc.assemble_vector(r_he)
+        F_l.ghostUpdate(
+            addv=petsc4py.PETSc.InsertMode.ADD, mode=petsc4py.PETSc.ScatterMode.REVERSE
+        )
+        nullspace_l.remove(F_l)
+        Dhe[:, p] = petsc.assemble_vector(r_he)[:]
+        w = opensg.solve_ksp(A_l, F_l, V_l)
+        V0[:, p] = w.vector[:]
 
-    # Scalar assembly for each term of D_ee matrix
-    for s in range(6):  
-        for k in range(6):
-            # f=dolfinx.fem.form(sum([opensg.compute_utils.Dee(x, u, material_props, theta, Eps)[s,k]*dx(i) for i in range(nphases)])) # Scalar assembly
-            f = 0
-            for j in range(nphases):
-                mat_name = mat_names[j]
-                material_props = material_database[mat_name]
-                theta = angle[j]
-                dee_val = opensg.compute_utils.Dee(x, u, material_props, theta, Eps)[s, k]
-                f += dee_val * dx(j)
-            f = dolfinx.fem.form(f)
+    D1 = np.matmul(V0.T, -Dhe)
+    for s in range(4):
+        for k in range(4):
+            f = dolfinx.fem.form(
+                sum(
+                    [
+                        dot(dot(gamma_e.T, as_tensor(ABD[i])), gamma_e)[s, k] * dx(i)
+                        for i in range(nphases)
+                    ]
+                )
+            )
             D_ee[s, k] = dolfinx.fem.assemble_scalar(f)
-            
-    D_eff = D_ee + D1
+
+    D_eff = D_ee + D1  # Effective Stiffness Matrix (EB)
+    F1 = sum(
+        [
+            dot(
+                dot(as_tensor(ABD[i]), opensg.gamma_l(e, x, v_)),
+                opensg.gamma_l(e, x, dv),
+            )
+            * dx(i)
+            for i in range(nphases)
+        ]
+    )
+    a1 = form(F1)
+    Dll = assemble_matrix(a1)
+    Dll.assemble()
+    ai, aj, av = Dll.getValuesCSR()
+    Dll = csr_matrix((av, aj, ai)).toarray()
+
+    for p in range(4):
+        Eps = gamma_e[:, p]
+        F1 = sum(
+            [
+                dot(dot(as_tensor(ABD[i]), Eps), opensg.gamma_l(e, x, v_)) * dx(i)
+                for i in range(nphases)
+            ]
+        )
+        Dle[:, p] = petsc.assemble_vector(form(F1))[:]
+
+    F_dhl = sum(
+        [
+            dot(
+                dot(as_tensor(ABD[i]), opensg.gamma_h(e, x, dv)),
+                opensg.gamma_l(e, x, v_),
+            )
+            * dx(i)
+            for i in range(nphases)
+        ]
+    )
+    ff = opensg.deri_constraint(dv, v_, boundary_mesh, nh)
+    a3 = form(F_dhl + ff)
+    Dhl = assemble_matrix(a3)
+    Dhl.assemble()
+    ai, aj, av = Dhl.getValuesCSR()
+    Dhl = csr_matrix((av, aj, ai)).toarray()
+
+    # DhlTV0
+    DhlV0 = np.matmul(Dhl.T, V0)
+
+    # DhlTV0Dle
+    DhlTV0Dle = np.matmul(Dhl, V0) + Dle
+
+    # V0DllV0
+    V0DllV0 = np.matmul(np.matmul(V0.T, Dll), V0)
+
+    # V1s  ****Updated from previous version as for solving boundary V1s, we can directly use (A_l V1s=b),  and solve for V1s
+    b = DhlTV0Dle - DhlV0
+    ai, aj, av = A_l.getValuesCSR()
+    A_l = csr_matrix((av, aj, ai))
+    V1s = scipy.sparse.linalg.spsolve(A_l, b, permc_spec=None, use_umfpack=True)
+
+    # Ainv
+    Ainv = np.linalg.inv(D_eff)
+
+    # B_tim
+    B_tim = np.matmul(DhlTV0Dle.T, V0)
+
+    # C_tim
+    C_tim = V0DllV0 + np.matmul(V1s.T, DhlV0 + DhlTV0Dle)
+    C_tim = 0.5 * (C_tim + C_tim.T)
+
+    # Ginv
+    Q_tim = np.matmul(Ainv, np.array([(0, 0), (0, 0), (0, -1), (1, 0)]))
+    Ginv = np.matmul(
+        np.matmul(Q_tim.T, (C_tim - np.matmul(np.matmul(B_tim.T, Ainv), B_tim))), Q_tim
+    )
+    G_tim = np.linalg.inv(Ginv)
+    Y_tim = np.matmul(np.matmul(B_tim.T, Q_tim), G_tim)
+    A_tim = D_eff + np.matmul(np.matmul(Y_tim, Ginv), Y_tim.T)
+
+    # Deff_srt
+    D = np.zeros((6, 6))
+
+    D[4:6, 4:6] = G_tim
+    D[0:4, 4:6] = Y_tim
+    D[4:6, 0:4] = Y_tim.T
+    D[0:4, 0:4] = A_tim
+
+    Deff_srt = np.zeros((6, 6))
+    Deff_srt[0, 3:6] = A_tim[0, 1:4]
+    Deff_srt[0, 1:3] = Y_tim[0, :]
+    Deff_srt[0, 0] = A_tim[0, 0]
+
+    Deff_srt[3:6, 3:6] = A_tim[1:4, 1:4]
+    Deff_srt[3:6, 1:3] = Y_tim[1:4, :]
+    Deff_srt[3:6, 0] = A_tim[1:4, 0]
+
+    Deff_srt[1:3, 1:3] = G_tim
+    Deff_srt[1:3, 3:6] = Y_tim.T[:, 1:4]
+    Deff_srt[1:3, 0] = Y_tim.T[:, 0]
+
+    return np.around(D_eff), np.around(Deff_srt), V0, V1s
+
+def compute_solidtimo_boun(mat_param, boundary_submeshdata):
+    """
+    Solve EB and Timo model for boundary mesh.
+    The output fluctuating functions V0 and V1s are used dirichilet boundary constraints
+
+    Parameters:
+        mesh_l: Left Boundary mesh
+        subdomains_l:  Left Boundary subdomains (layup information)
+        frame_l: local orientation frame (DG space)
+    Returns:
+        D_eff (np array): [4,4] !Boundary EB Stiffness matrix
+        Deff_srt (np array):[6,6] !Boundary Timoshenko Stiffness matrix
+        V0 (np array): [ndofs_leftmesh,4] !Boundary fluctuating function solutions after solving load cases (useful in WB segment EB)
+        V1s (np array):[ndofs_leftmesh,4] !Boundary fluctuating function solutions after solving load cases (useful in WB segment Timoshenko Stiffness)
+    """
+    boundary_mesh = boundary_submeshdata["mesh"]
+    boundary_subdomains = boundary_submeshdata["subdomains"]
+    boundary_frame = boundary_submeshdata["frame"]
     
-    return D_eff
+    nphases = len(mat_param)
 
+    e, V_l, dv, v_, x, dx = opensg.local_boun(
+        boundary_mesh, boundary_frame, boundary_subdomains
+    )
+    boundary_null = opensg.compute_nullspace(V_l)
+    boundary_mesh.topology.create_connectivity(2,2)
+    V0, Dle, Dhe, D_ee, V1s = opensg.initialize_array(V_l)
 
-### solve stiffness via EB method
-# @profile
-def compute_stiffness_EB_blade_segment(
-    ABD, # array
-    mesh, # 
-    frame, # 
-    subdomains, 
-    l_submesh, # dictionary with mesh data for l boundary
-    r_submesh # dictionary with mesh data for r boundary
-    ):
-    """Computes the ABD stiffness matrix using the EB method for a blade segment
+    F2 = sum(
+        [
+            dot(
+                dot(opensg.C(i,boundary_frame,mat_param),opensg.gamma_h(dx,dv,dim=2)),
+                opensg.gamma_h(dx, v_,dim=2)
+            )
+            * dx(i)
+            for i in range(nphases)
+        ]
+    )
+    A_l = assemble_matrix(form(F2))
+    A_l.assemble()
+    A_l.setNullSpace(boundary_null)
+
+    gamma_e = opensg.gamma_e(x)
+    for p in range(4):
+        F2 = sum(
+            [
+            dot(dot(opensg.C(ii,boundary_frame,mat_param),gamma_e[:,p]),opensg.gamma_h(dx,v_,dim=2))
+             *dx(ii) for ii in range(nphases)
+            ]
+        )
+        r_he = form(rhs(F2))
+        F_l = petsc.assemble_vector(r_he)
+        F_l.ghostUpdate(
+            addv=petsc4py.PETSc.InsertMode.ADD, mode=petsc4py.PETSc.ScatterMode.REVERSE
+        )
+        boundary_null.remove(F_l)
+        Dhe[:, p] = petsc.assemble_vector(r_he)[:]
+        V0[:,p]= opensg.solve_ksp(A_l, F_l, V_l) 
+        
+    V0_csr=csr_matrix(V0) 
+    D1=V0_csr.T.dot(csr_matrix(-Dhe))
+    for s in range(4):
+        for k in range(4):
+            f = dolfinx.fem.form(
+                sum(
+                    [
+                        dot(dot(gamma_e.T, opensg.C(i,boundary_frame,mat_param)), gamma_e)[s, k] * dx(i)
+                        for i in range(nphases)
+                    ]
+                )
+            )
+            D_ee[s, k] = dolfinx.fem.assemble_scalar(f)
+
+    D_eff = D_ee + D1  # Effective Stiffness Matrix (EB)
+    F1 = sum(
+        [
+            dot(
+                dot(opensg.C(i,boundary_frame,mat_param), opensg.gamma_l(dv)),
+                opensg.gamma_l(v_),
+            )
+            * dx(i)
+            for i in range(nphases)
+        ]
+    )
+    a1 = form(F1)
+    Dll = assemble_matrix(a1)
+    Dll.assemble()
+    ai, aj, av = Dll.getValuesCSR()
+    Dll = csr_matrix((av, aj, ai))
+
+    for p in range(4):
+        Eps = gamma_e[:, p]
+        F1 = sum(
+            [
+                dot(dot(opensg.C(i,boundary_frame,mat_param), Eps), opensg.gamma_l(v_)) * dx(i)
+                for i in range(nphases)
+            ]
+        )
+        Dle[:, p] = petsc.assemble_vector(form(F1))[:]
+
+    F_dhl = sum(
+        [
+            dot(
+                dot(opensg.C(i,boundary_frame,mat_param), opensg.gamma_h(dx, dv,dim=2)),
+                opensg.gamma_l(v_)
+            )
+            * dx(i)
+            for i in range(nphases)
+        ]
+    )
+    a3 = form(F_dhl)
+    Dhl = assemble_matrix(a3)
+    Dhl.assemble()
+    ai, aj, av = Dhl.getValuesCSR()
+    Dhl = csr_matrix((av, aj, ai))
+    
+    #DhlV0
+    DhlV0=Dhl.T.dot(V0_csr) 
+    
+    #DhlTV0Dle
+    DhlTV0Dle=Dhl.dot(V0_csr)+csr_matrix(Dle)
+    
+    #V0DllV0
+    V0DllV0=(V0_csr.T.dot(Dll)).dot(V0_csr)
+
+    # V1s  ****Updated from previous version as for solving boundary V1s, we can directly use (A_l V1s=b),  and solve for V1s
+    b = (DhlTV0Dle - DhlV0).toarray()
+    for p in range(4):
+        F=petsc4py.PETSc.Vec().createWithArray(b[:,p],comm=MPI.COMM_WORLD)
+        F.ghostUpdate(
+            addv=petsc4py.PETSc.InsertMode.ADD, mode=petsc4py.PETSc.ScatterMode.REVERSE
+        )
+        boundary_null.remove(F)
+        V1s[:,p]= opensg.solve_ksp(A_l, F, V_l) 
+
+    # Ainv
+    Ainv=np.linalg.inv(D_eff).astype(np.float64)
+    
+    # B_tim
+    B_tim=DhlTV0Dle.T.dot(V0_csr)
+    B_tim=B_tim.toarray().astype(np.float64)
+    
+    # C_tim
+    C_tim= V0DllV0 + csr_matrix(V1s).T.dot(DhlV0 + DhlTV0Dle) 
+    C_tim=0.5*(C_tim+C_tim.T)
+    C_tim=C_tim.toarray().astype(np.float64)
+
+    # Ginv
+    Q_tim = np.matmul(Ainv, np.array([(0, 0), (0, 0), (0, -1), (1, 0)])).astype(np.float64)
+    Ginv = np.matmul(
+        np.matmul(Q_tim.T, (C_tim - np.matmul(np.matmul(B_tim.T, Ainv), B_tim))), Q_tim
+    )
+    G_tim = np.linalg.inv(Ginv)
+    Y_tim = np.matmul(np.matmul(B_tim.T, Q_tim), G_tim)
+    A_tim = D_eff + np.matmul(np.matmul(Y_tim, Ginv), Y_tim.T)
+
+    # Deff_srt
+    D = np.zeros((6, 6))
+
+    D[4:6, 4:6] = G_tim
+    D[0:4, 4:6] = Y_tim
+    D[4:6, 0:4] = Y_tim.T
+    D[0:4, 0:4] = A_tim
+
+    Deff_srt = np.zeros((6, 6))
+    Deff_srt[0, 3:6] = A_tim[0, 1:4]
+    Deff_srt[0, 1:3] = Y_tim[0, :]
+    Deff_srt[0, 0] = A_tim[0, 0]
+
+    Deff_srt[3:6, 3:6] = A_tim[1:4, 1:4]
+    Deff_srt[3:6, 1:3] = Y_tim[1:4, :]
+    Deff_srt[3:6, 0] = A_tim[1:4, 0].flatten()
+
+    Deff_srt[1:3, 1:3] = G_tim
+    Deff_srt[1:3, 3:6] = Y_tim.T[:, 1:4]
+    Deff_srt[1:3, 0] = Y_tim.T[:, 0].flatten()
+
+    return np.around(D_eff), np.around(Deff_srt), V0, V1s
+    
+
+def compute_stiffness(
+    mat_param,
+    meshdata,
+    l_submesh,
+    r_submesh):
+    """_summary_
 
     Parameters
     ----------
-    ABD : list[array]
-        list of ABD matrices for each phase
-    mesh : _type_
+    ABD : _type_
         _description_
-    frame : _type_
+    mesh : _type_
         _description_
     subdomains : _type_
         _description_
@@ -179,260 +407,204 @@ def compute_stiffness_EB_blade_segment(
 
     Returns
     -------
-    array
-        Stiffness matrix
+    tuple(np.array)
+        segment_timo_stiffness, segment_eb_stiffness, l_timo_stiffness, r_timo_stiffness
     """
-    tdim = mesh.topology.dim
+    tdim=meshdata["mesh"].topology.dim
     fdim = tdim - 1
-    nphases = max(subdomains.values[:]) + 1
-    assert nphases == len(ABD)
-    pp = mesh.geometry.x # point data
-    x_min, x_max=min(pp[:,0]), max(pp[:,0])
+    nphases=len(mat_param)
+    # Initialize terms
+    # NOTE: why do we need the frame from local_frame_1D instead of the already computed frames
+    e_l, V_l, dvl, v_l, x_l, dx_l = opensg.local_boun(l_submesh["mesh"], l_submesh["frame"],l_submesh["subdomains"])
+    e_r, V_r, dvr, v_r, x_r, dx_r = opensg.local_boun(r_submesh["mesh"], r_submesh["frame"] ,r_submesh["subdomains"])
 
-    # Initialize nullspaces
-    V_l = dolfinx.fem.functionspace(l_submesh["mesh"], basix.ufl.element(
-        "S", l_submesh["mesh"].topology.cell_name(), 2, shape = (3, )))
-        
-    V_r = dolfinx.fem.functionspace(r_submesh["mesh"], basix.ufl.element(
-        "S", r_submesh["mesh"].topology.cell_name(), 2, shape = (3, )))
-    
-    # Compute boundaries
-    # NOTE: not the stiffness matrix
+    # V0_l,V0_r=solve_boun(mesh_l,local_frame_1D(mesh_l),subdomains_l),solve_boun(mesh_r,local_frame_1D(mesh_l),subdomains_r)
+    D_effEB_l, Deff_l, V0_l, V1_l = opensg.compute_solidtimo_boun(mat_param, l_submesh)
+    D_effEB_r, Deff_r, V0_r, V1_r = opensg.compute_solidtimo_boun(mat_param, r_submesh)
 
-    V0_l = compute_eb_blade_segment_boundary(ABD, l_submesh)
-    V0_r = compute_eb_blade_segment_boundary(ABD, r_submesh)
-        
-    # The local_frame_l(submesh["mesh"]) can be replaced with frame_l, if we want to use mapped orientation from given direction cosine matrix (orien mesh data-yaml)
 
-    # Quad mesh
-    e, V, dv, v, x, dx = opensg.local_boun(mesh, frame, subdomains)
-    V0, Dle, Dhe, Dhd, Dld, D_ed, D_dd, D_ee, V1s = opensg.initialize_array(V)
-    mesh.topology.create_connectivity(1, 2)
-    l_submesh["mesh"].topology.create_connectivity(1, 1)
-    r_submesh["mesh"].topology.create_connectivity(1, 1)
+    # ***************** Wb Segment (surface mesh) computation begins************************
+    e, V, dv, v_, x, dx = opensg.local_boun(meshdata["mesh"], meshdata["frame"], meshdata["subdomains"])
+    V0, Dle, Dhe, D_ee, V1s = opensg.initialize_array(V)
 
-    # Obtaining coefficient matrix AA and BB with and without bc applied.
-    # Note: bc is applied at boundary dofs. We define v2a containing all dofs of entire wind blade.
-    # NOTE: does order of right and left submesh matter here?
-    boundary_dofs = locate_dofs_topological(V, fdim, np.concatenate((r_submesh["entity_map"], l_submesh["entity_map"]), axis=0))
-    F2=sum([dot(dot(as_tensor(ABD[i]), opensg.gamma_h(e,x,dv)), opensg.gamma_h(e,x,v))*dx(i) for i in range(nphases)])  
-    v2a=Function(V) # b default, v2a has zero value for all. 
-    bc = dolfinx.fem.dirichletbc(v2a, boundary_dofs) # This shows only boundary_dofs are taken for v2a under bc, which are zero (known) as input.
-    a = form(F2)
-    
-    B = assemble_matrix(a)   # Obtain coefficient matrix without BC applied: BB
-    B.assemble()
-    ai, aj, av=B.getValuesCSR()
-    BB = csr_matrix((av, aj, ai))
-    BB = BB.toarray()  
-    
-    A = assemble_matrix(a,[bc])  # Obtain coefficient matrix with BC applied: AA
+    meshdata["mesh"].topology.create_connectivity(2, 3)
+    l_submesh["mesh"].topology.create_connectivity(2, 2)
+    r_submesh["mesh"].topology.create_connectivity(2, 2)
+
+    F2 = sum(
+        [
+            dot(dot(opensg.C(i, meshdata["frame"],mat_param), opensg.gamma_h(dx, dv,dim=3)), opensg.gamma_h(dx, v_,dim=3)) * dx(i)
+            for i in range(nphases)
+        ]
+    )
+
+    # bc applied
+    boundary_dofs = locate_dofs_topological(
+        V, fdim, np.concatenate((r_submesh["entity_map"], l_submesh["entity_map"]), axis=0)
+    )
+    a= form(F2)
+    v2a = Function(V)
+    bc = dolfinx.fem.dirichletbc(v2a, boundary_dofs)
+    A = assemble_matrix(a, [bc])  # Obtain coefficient matrix with BC applied: AA
     A.assemble()
-    ai, aj, av=A.getValuesCSR()
-    AA = csr_matrix((av, aj, ai))
-    AA=AA.toarray()
-    avg=np.trace(AA)/len(AA)     
-
-    # averaging is done so that all terms are of same order. Note after appliying bc at [A=assemble_matrix(a,[bc])], the dofs of
-    # coefficientmatrix has only 1 replaced at that dofs. 
-    for i,xx in enumerate(av):
-        if xx==1:
-            av[i]=avg        
-                            
-    AA_csr = csr_matrix((av, aj, ai))
-    AAA = AA_csr.toarray() 
-    AA = scipy.sparse.csr_matrix(AAA) 
 
     # Assembly
     # Running for 4 different F vector. However, F has bc applied to it where, stored known values of v2a is provided for each loop (from boun solve).
-    for p in range(4): # 4 load cases meaning 
-        # Boundary 
+
+    for p in range(4):  # 4 load cases meaning
+        # Boundary
         v2a = Function(V)
-        # NOTE: V0 first dimension is degrees of freedom and second dimension is load cases
-        v2a = opensg.dof_mapping_quad(V, v2a, V_l, V0_l[:,p], l_submesh["facets"], l_submesh["entity_map"])
-        # NOTE: does this second call overwrite previous, or is the data combined? -klb
-        v2a = opensg.dof_mapping_quad(V, v2a,V_r,V0_r[:,p], r_submesh["facets"], r_submesh["entity_map"])  
         
-        # quad mesh
-        F2=sum([dot(dot(as_tensor(ABD[i]),opensg.construct_gamma_e(e,x)[:,p]), opensg.gamma_h(e,x,v))*dx(i) for i in range(nphases)])  
-        bc = dolfinx.fem.dirichletbc(v2a, boundary_dofs)
-        F = petsc.assemble_vector(form(rhs(F2)))
-        apply_lifting(F, [a], [[bc]]) # apply bc to rhs vector (Dhe)
-        set_bc(F, [bc])
-        with F.localForm() as local_F:
-            for i in boundary_dofs:
-                for k in range(3):
-                    # F[3*i+k]=avg*F[3*i+k] # normalize small terms
-                    local_index = 3 * i + k
-                    local_F[local_index] = avg * local_F[local_index]
-                
-        V0[:,p]=  scipy.sparse.linalg.spsolve(AA, F, permc_spec=None, use_umfpack=True) # obtain sol: E* V1s = b*
-        Dhe[:,p]= scipy.sparse.csr_array(BB).dot(V0[:,p])
-        
-    D1 = np.matmul(V0.T,-Dhe) 
-    gamma_e = opensg.construct_gamma_e(e,x)
-    q1 = gamma_e.T
-    q3 = gamma_e
-    
+        v2a = opensg.dof_mapping_quad(V, v2a, V_l, V0_l[:, p], l_submesh["facets"], l_submesh["entity_map"])
+        v2a = opensg.dof_mapping_quad(V, v2a, V_r, V0_r[:, p], r_submesh["facets"], r_submesh["entity_map"])
+        print(V0_l[0:20,p])
+        F2 = -sum(
+            [
+                dot(dot(opensg.C(i,meshdata["frame"],mat_param), opensg.gamma_e(x)[:, p]), opensg.gamma_h(dx, v_,dim=3)) * dx(i)
+                for i in range(nphases)
+            ]
+        )
+        bc = [dolfinx.fem.dirichletbc(v2a, boundary_dofs)]
+        F = petsc.assemble_vector(form(F2))
+        apply_lifting(
+            F, [a], [bc]
+        )  # apply bc to rhs vector (Dhe) based on known fluc solutions  C(i,frame,mat_param)
+        set_bc(F, bc)
+        V0[:, p] = opensg.solve_ksp(A, F, V)
+
+    V0_csr=csr_matrix(V0)    
+    D1=V0_csr.T.dot(csr_matrix(-Dhe)).astype(np.float64)
     for s in range(4):
         for k in range(4):
-            # f = dolfinx.fem.form(sum([dot(dot(opensg.construct_gamma_e(e,x).T,as_tensor(ABD[i])),opensg.construct_gamma_e(e,x))[s,k]*dx(i) for i in range(nphases)])) 
-            form_list = []
-            for i in range(nphases):
-                q2 = as_tensor(ABD[i])
-                dot1 = dot(q1, q2)
-                dot2 = dot(dot1, q3)
-                q4 = dot2[s,k]
-                form_list.append(q4*dx(i))
-            f = dolfinx.fem.form(sum(form_list))
-            
-            D_ee[s,k]=dolfinx.fem.assemble_scalar(f)
-    L = (x_max - x_min)
-    D_eff= D_ee + D1
-    D_eff=D_eff/L  # L is divided because of 3D shell mesh and corresponding beam length need to divided.
-    #--------------------------------------Printing Output Data---------------------------------------
-    print('  ')  
-    print('Stiffness Matrix')
-    np.set_printoptions(precision=4)
-    print(np.around(D_eff))
-    
-    return D_eff
-
-def compute_eb_blade_segment_boundary(
-    ABD, # array
-    submeshdata, # dictionary with mesh data for l boundary
-    # nphases
-    # r_submesh # dictionary with mesh data for r boundary
-    ):
-    
-    # Initialize terms
-    # e, V, dv, v, x, dx = opensg.local_boun(
-    #     submeshdata["mesh"], submeshdata["frame"], submeshdata["subdomains"])
-    V = dolfinx.fem.functionspace(submeshdata["mesh"], basix.ufl.element(
-        "S", submeshdata["mesh"].topology.cell_name(), 2, shape = (3, )))
-    
-    submeshdata["nullspace"] = opensg.compute_nullspace(V)
-    
-    V0 = opensg.solve_eb_boundary(ABD, submeshdata)
-    
-    return V0
-    
-
-def compute_timo_boun(ABD, mesh, subdomains, frame, nullspace, sub_nullspace, nphases):
-
-    mesh = opensg.local_frame_1D(mesh)
-    e, V_l, dv, v_, x, dx = opensg.compute_utils.local_boun(mesh,frame,subdomains)          
-    mesh.topology.create_connectivity(1, 1)
-    V0,Dle,Dhe,Dhd,Dld,D_ed,D_dd,D_ee,V1s = opensg.compute_utils.initialize_array(V_l)
-    A_l = opensg.A_mat(e,x,dx,nullspace(V_l),v_,dv, nphases)
-    
-    for p in range(4):
-        Eps = opensg.compute_utils.gamma_e(e,x)[:,p]
-        F2 = sum([dot(dot(as_tensor(ABD[i]),Eps), opensg.compute_utils.gamma_h(e,x,v_))*dx(i) for i in range(nphases)])   
-        r_he = form(rhs(F2))
-        F_l = petsc.assemble_vector(r_he)
-        F_l.ghostUpdate(addv = petsc4py.PETSc.InsertMode.ADD, mode = petsc4py.PETSc.ScatterMode.REVERSE)
-        sub_nullspace.remove(F_l)
-        w_l = opensg.compute_utils.solve_ksp(A_l,F_l,V_l)
-        Dhe[:,p]=  F_l[:]
-        V0[:,p]= w_l.vector[:]
-    D1 = np.matmul(V0.T,-Dhe)   
-    for s in range(4):
-        for k in range(4): 
-            f = dolfinx.fem.form(sum([dot(dot(opensg.compute_utils.gamma_e(e,x).T,as_tensor(ABD[i])),opensg.compute_utils.gamma_e(e,x))[s,k]*dx(i) for i in range(nphases)]))
-            D_ee[s,k] = dolfinx.fem.assemble_scalar(f)
-        
-    D_eff= D_ee + D1 # Effective Stiffness Matrix (EB)
-    print('EB Computed')
-    F1 = sum([dot(dot(as_tensor(ABD[i]),opensg.compute_utils.gamma_l(e,x,v_)),opensg.compute_utils.gamma_l(e,x,dv))*dx(i) for i in range(nphases)])
+            f = dolfinx.fem.form(
+                sum(
+                    [
+                        dot(dot(opensg.gamma_e(x).T, opensg.C(i,meshdata["frame"],mat_param)), opensg.gamma_e(x))[s, k]
+                        * dx(i)
+                        for i in range(nphases)
+                    ]
+                )
+            )
+            D_ee[s, k] = dolfinx.fem.assemble_scalar(f)
+    L = max(meshdata["mesh"].geometry.x[:,0]) - min(meshdata["mesh"].geometry.x[:,0])
+    D_eff = (D_ee.astype(np.float64) + D1)/L 
+    D_eff=0.5*(D_eff+D_eff.T)
+    print(D_eff)
+    ##################Timoshenko Stiffness Matrix for WB segment begins###################################
+    # Process is similar to Timoshenko boundary implemented over WB segment mesh
+    F1 = sum(
+        [
+            dot(dot(opensg.C(i,meshdata["frame"],mat_param), opensg.gamma_l(v_)), opensg.gamma_l(dv)) * dx(i)
+            for i in range(nphases)
+        ]
+    ) 
     a1 = form(F1)
     Dll = assemble_matrix(a1)
     Dll.assemble()
     ai, aj, av = Dll.getValuesCSR()
-    Dll=  csr_matrix((av, aj, ai)).toarray()
-    
-    for p in range(4):
-            Eps = opensg.compute_utils.gamma_e(e,x)[:,p] 
-            F1 = sum([dot(dot(as_tensor(ABD[i]),Eps),opensg.compute_utils.gamma_l(e,x,v_))*dx(i) for i in range(nphases)])
-            Dle[:,p]= petsc.assemble_vector(form(F1))[:]
-        
-            Eps = opensg.compute_utils.gamma_d(e,x)[:,p] 
-            F1 = sum([dot(dot(as_tensor(ABD[i]),Eps),opensg.compute_utils.gamma_h(e,x,v_))*dx(i) for i in range(nphases)])      
-            Dhd[:,p]= petsc.assemble_vector(form(F1))[:]
-        
-            Eps = opensg.compute_utils.gamma_d(e,x)[:,p] 
-            F1 = sum([dot(dot(as_tensor(ABD[i]),Eps),opensg.compute_utils.gamma_l(e,x,v_))*dx(i) for i in range(nphases)])      
-            Dld[:,p]= petsc.assemble_vector(form(F1))[:]
-        
-    F_dhl = sum([dot(dot(as_tensor(ABD[i]),opensg.compute_utils.gamma_h(e,x,dv)),opensg.compute_utils.gamma_l(e,x,v_))*dx(i) for i in range(nphases)]) 
+    Dll = csr_matrix((av, aj, ai))
+
+    # Dhl
+    F_dhl = sum(
+        [
+            dot(dot(opensg.C(i,meshdata["frame"],mat_param), opensg.gamma_h(x, dv,dim=3)), opensg.gamma_l(v_)) * dx(i)
+            for i in range(nphases)
+        ]
+    )
     a3 = form(F_dhl)
     Dhl = assemble_matrix(a3)
     Dhl.assemble()
     ai, aj, av = Dhl.getValuesCSR()
-    Dhl = csr_matrix((av, aj, ai)).toarray()
-    for s in range(4):
-        for k in range(4):    
-            f = dolfinx.fem.form(sum([dot(dot(opensg.compute_utils.gamma_e(e,x).T,as_tensor(ABD[i])),opensg.compute_utils.gamma_d(e,x))[s,k]*dx(i) for i in range(nphases)]))
-            D_ed[s,k] = dolfinx.fem.assemble_scalar(f)
-    
-            f = dolfinx.fem.form(sum([dot(dot(opensg.compute_utils.gamma_d(e,x).T,as_tensor(ABD[i])),opensg.compute_utils.gamma_d(e,x))[s,k]*dx(i) for i in range(nphases)]))
-            D_dd[s,k] = dolfinx.fem.assemble_scalar(f) 
-        
-    #DhlTV0
-    DhlV0 = np.matmul(Dhl.T,V0)
+    Dhl = csr_matrix((av, aj, ai))
+
+    for p in range(4):
+        F1 = sum(
+            [
+                dot(dot(opensg.C(i,meshdata["frame"],mat_param), opensg.gamma_e(x)[:, p]), opensg.gamma_l(v_)) * dx(i)
+                for i in range(nphases)
+            ]
+        )
+        Dle[:, p] = petsc.assemble_vector(form(F1))[:]
+
+
+    #DhlV0
+    DhlV0=Dhl.T.dot(V0_csr) 
     
     #DhlTV0Dle
-    DhlTV0Dle = np.matmul(Dhl,V0)+Dle
+    DhlTV0Dle=Dhl.dot(V0_csr)+csr_matrix(Dle)
     
     #V0DllV0
-    V0DllV0 = np.matmul(np.matmul(V0.T,Dll),V0)
-    
+    V0DllV0=(V0_csr.T.dot(Dll)).dot(V0_csr)
+
     # V1s
-    b = DhlTV0Dle-DhlV0-Dhd
-    
-    for p in range(4):
-        F = petsc4py.PETSc.Vec().createWithArray(b[:,p],comm = MPI.COMM_WORLD)
-        F.ghostUpdate(addv = petsc4py.PETSc.InsertMode.ADD, mode = petsc4py.PETSc.ScatterMode.REVERSE)
-        sub_nullspace.remove(F)
-        w_l = opensg.compute_utils.solve_ksp(A_l,F,V_l)
-        V1s[:,p]= w_l.vector[:]  
-        
+    b = (DhlTV0Dle - DhlV0).toarray()
+
+    # Assembly
+    # For WB mesh (surface elements, for solving (A V1s = b), directly cannot be computed as we require dirichilet bc)
+    for p in range(4):  # 4 load cases meaning
+        # Boundary
+        v2a = Function(V)
+        v2a = opensg.dof_mapping_quad(V, v2a, V_l, V1_l[:, p], l_submesh["facets"], l_submesh["entity_map"])
+        v2a = opensg.dof_mapping_quad(V, v2a, V_r, V1_r[:, p], r_submesh["facets"], r_submesh["entity_map"])
+        bc = [dolfinx.fem.dirichletbc(v2a, boundary_dofs)]
+
+        # quad mesh
+        F = petsc4py.PETSc.Vec().createWithArray(
+            b[:, p], comm=MPI.COMM_WORLD
+        )  # Converting b[:,p] numpy vector to petsc array
+        F.ghostUpdate(
+            addv=petsc4py.PETSc.InsertMode.ADD, mode=petsc4py.PETSc.ScatterMode.REVERSE
+        )
+        apply_lifting(F, [a], [bc])
+        set_bc(F, bc)
+        V1s[:, p] = opensg.solve_ksp(A, F, V)
+
     # Ainv
-    Ainv = np.linalg.inv(D_eff)
+    Ainv=np.linalg.inv(D_eff).astype(np.float64)
     
     # B_tim
-    B_tim= np.matmul(DhlTV0Dle.T,V0)+ D_ed+ np.matmul(V0.T,Dhd)
+    B_tim=DhlTV0Dle.T.dot(V0_csr)
+    B_tim=B_tim.toarray().astype(np.float64)
     
     # C_tim
-    C_tim= V0DllV0 + np.matmul(V1s.T,DhlV0 + DhlTV0Dle)+2*np.matmul(V0.T,Dld)+ D_dd+np.matmul(V1s.T,Dhd)
-    C_tim = 0.5*(C_tim+C_tim.T)
-    
+    C_tim= V0DllV0 + csr_matrix(V1s).T.dot(DhlV0 + DhlTV0Dle) 
+    C_tim=0.5*(C_tim+C_tim.T) 
+    C_tim=C_tim.toarray().astype(np.float64)
+
     # Ginv
-    Q_tim = np.matmul(Ainv,np.array([(0,0),(0,0),(0,-1),(1,0)]))
-    Ginv= np.matmul(np.matmul(Q_tim.T,(C_tim-np.matmul(np.matmul(B_tim.T,Ainv),B_tim))),Q_tim)
+    Q_tim = np.matmul(Ainv, np.array([(0, 0), (0, 0), (0, -1), (1, 0)])).astype(np.float64)
+    Ginv = np.matmul(
+        np.matmul(Q_tim.T, (C_tim - np.matmul(np.matmul(B_tim.T, Ainv), B_tim))), Q_tim
+    )
     G_tim = np.linalg.inv(Ginv)
-    Y_tim= np.matmul(np.matmul(B_tim.T,Q_tim),G_tim)
-    A_tim= D_eff + np.matmul(np.matmul(Y_tim,Ginv),Y_tim.T)
-    
+    Y_tim = np.matmul(np.matmul(B_tim.T, Q_tim), G_tim)
+    A_tim = D_eff + np.matmul(np.matmul(Y_tim, Ginv), Y_tim.T)
+
     # Deff_srt
-    D = np.zeros((6,6))
-    
-    D[4:6,4:6] = G_tim
-    D[0:4,4:6] = Y_tim
-    D[4:6,0:4] = Y_tim.T
-    D[0:4,0:4] = A_tim
-    
-    Deff_srt = np.zeros((6,6))
-    Deff_srt[0,3:6] = A_tim[0,1:4]
-    Deff_srt[0,1:3] = Y_tim[0,:]
-    Deff_srt[0,0] = A_tim[0,0]
-    
-    Deff_srt[3:6,3:6] = A_tim[1:4,1:4]
-    Deff_srt[3:6,1:3] = Y_tim[1:4,:]
-    Deff_srt[3:6,0] = A_tim[1:4,0]
-    
-    Deff_srt[1:3,1:3] = G_tim
-    Deff_srt[1:3,3:6] = Y_tim.T[:,1:4]
-    Deff_srt[1:3,0] = Y_tim.T[:,0]
-    
-    return np.around(D_eff), np.around(Deff_srt)
+    D = np.zeros((6, 6))
+
+    D[4:6, 4:6] = G_tim
+    D[0:4, 4:6] = Y_tim
+    D[4:6, 0:4] = Y_tim.T
+    D[0:4, 0:4] = A_tim
+
+    Deff_srt = np.zeros((6, 6))
+    Deff_srt[0, 3:6] = A_tim[0, 1:4]
+    Deff_srt[0, 1:3] = Y_tim[0, :]
+    Deff_srt[0, 0] = A_tim[0, 0]
+
+    Deff_srt[3:6, 3:6] = A_tim[1:4, 1:4]
+    Deff_srt[3:6, 1:3] = Y_tim[1:4, :]
+    Deff_srt[3:6, 0] = A_tim[1:4, 0].flatten()
+
+    Deff_srt[1:3, 1:3] = G_tim
+    Deff_srt[1:3, 3:6] = Y_tim.T[:, 1:4]
+    Deff_srt[1:3, 0] = Y_tim.T[:, 0].flatten()
+
+    print("\n Timo Stiffness Matrix for WB Segment \n")
+    np.set_printoptions(precision=4)
+    print(np.around(Deff_srt))
+
+        
+    return Deff_srt, D_eff, Deff_l, Deff_r
+
