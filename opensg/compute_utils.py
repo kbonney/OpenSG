@@ -4,7 +4,7 @@ Created on Tue Jun 17 20:08:04 2025
 
 @author: bagla0
 """
-
+from typing import List, Tuple
 from mpi4py import MPI
 import numpy as np
 import dolfinx
@@ -12,6 +12,8 @@ import basix
 from dolfinx.fem import form, Function, locate_dofs_topological, assemble_scalar
 from ufl import TrialFunction, TestFunction, as_tensor, dot, SpatialCoordinate, Measure, as_vector
 import petsc4py.PETSc
+from petsc4py import PETSc
+from slepc4py import SLEPc
 
 def generate_boundary_markers(xmin, xmax):
     def is_left_boundary(x):
@@ -299,7 +301,7 @@ def recov(st):
     return recov 
 
 def EPS_get_spectrum(
-    EPS: SLEPc.EPS, V: FunctionSpace
+    EPS: SLEPc.EPS, V: dolfinx.fem.FunctionSpace
 ) -> Tuple[List[complex], List[PETSc.Vec], List[PETSc.Vec]]:
     """Retrieve eigenvalues and eigenfunctions from SLEPc EPS object.
     Parameters
