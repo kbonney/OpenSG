@@ -4,7 +4,7 @@ import basix
 from dolfinx.io import gmshio
 from mpi4py import MPI
 import opensg
-
+import gmsh
 class BladeMesh:
     """This class processes and stores information about a wind turbine blade's mesh
     """
@@ -36,7 +36,7 @@ class BladeMesh:
         self.mat_name=[]
         self.elLayID=np.zeros((self.num_elements))
         for es in self.sets['element']:
-            if es['labels'] is not None:
+            if es['labels'][0] is not None:
                 self.mat_name.append(es['name'])
                 layCt += 1
                 for eli in es['labels']:
@@ -154,6 +154,8 @@ class SegmentMesh():
         self.blade_mesh = parent_blade_mesh
         self.elLayID=parent_blade_mesh.elLayID
         self.material_database=parent_blade_mesh.material_database
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 0)    # mesh read output will not be printed
         self.mesh, self.subdomains, self.boundaries = gmshio.read_from_msh(msh_file, MPI.COMM_WORLD,0, gdim=3)
         self.original_cell_index = self.mesh.topology.original_cell_index # Original cell Index from mesh file
    #     lnn = self.subdomains.values[:]-1
@@ -315,6 +317,9 @@ class SegmentMesh():
         self.meshdata = {
             "mesh": self.mesh, 
             "subdomains": self.subdomains,
-            "frame": self.frame}
+            "frame": self.frame,
+            }
             
         return   
+
+
