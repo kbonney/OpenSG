@@ -43,8 +43,22 @@ def C(i,frame,material_parameters):  # Stiffness matrix
     S[3,3], S[4,4], S[5,5]= 1/G23, 1/G13, 1/G12 
     CC=as_tensor(np.linalg.inv(S))
     R_sig=Rsig(frame)
-    return dot(dot(R_sig,CC),R_sig.T) 
+    return dot(dot(R_sig,CC),R_sig.T)
+    
+def epsilon(u): 
+    E1=as_vector([u[0].dx(0),u[1].dx(1),u[2].dx(2),(u[1].dx(2)+u[2].dx(1)),(u[0].dx(2)+u[2].dx(0)),(u[0].dx(1)+u[1].dx(0))])
+    return as_tensor([(E1[0],0.5*E1[5],0.5*E1[4]),(0.5*E1[5],E1[1],0.5*E1[3]),(0.5*E1[4],0.5*E1[3],E1[2])]),E1
+    
+def sigma(u,i,CC):  # v is strain variable (ufl)
+    s1=dot(as_tensor(CC[i]),epsilon(u)[1])
+    return as_tensor([(s1[0],s1[5],s1[4]),(s1[5],s1[1],s1[3]),(s1[4],s1[3],s1[2])]),s1
 
+def sigma_prestress(i,CC,strain_3D):
+    s_pre=dot(as_tensor(CC[i]),strain_3D)
+    return as_tensor([(s_pre[0],s_pre[5],s_pre[4]),
+                      (s_pre[5],s_pre[1],s_pre[3]),
+                      (s_pre[4],s_pre[3],s_pre[2])])
+                          
 def mass_boun(x,dx,density,nphases): # Mass matrix
     mu= assemble_scalar(form(sum([density[i]*dx(i) for i in range(nphases)])))
     xm2=(1/mu)*assemble_scalar(form(sum([x[1]*density[i]*dx(i) for i in range(nphases)])))
@@ -139,12 +153,12 @@ def compute_nullspace(V):
     for i in range(gdim):
         basis[i][dofs[i]] = 1.0
     # Build rotational null space basis
-    x = V.tabulate_dof_coordinates()
+    xx = V.tabulate_dof_coordinates()
     dofs_block = V.dofmap.list.reshape(-1)
-    x1, x2 = x[dofs_block, 1], x[dofs_block, 2]
+    x2, x3 = xx[dofs_block, 1], xx[dofs_block, 2]
 
-    basis[3][dofs[2]] = x1
-    basis[3][dofs[1]] = -x2
+    basis[3][dofs[1]] = -x3
+    basis[3][dofs[2]] = x2
     for b in nullspace_basis:
         b.scatter_forward()
 
@@ -175,29 +189,21 @@ def gamma_e(x):
         (0, 0, 0, 0),
         (0, 0, 0, 0),
         (0, x[1], 0, 0),
-        (0, -x[2], 1, 0),
+        (0, -x[2], 0, 0),
     ])
     
     return gamma_e
 
 
-#def Dee_(x, C):
-#        x2,x3=x[1],x[2]
-#        return as_tensor([
-#            (C[0,0],               C[0,4]*x2-C[0,5]*x3,                                 C[0,0]*x3,                -C[0,0]*x2),
-#            (C[4,0]*x2-C[5,0]*x3, x2*(C[4,4]*x2-C[5,4]*x3)-x3*(C[4,5]*x2-C[5,5]*x3), x3*(C[4,0]*x2-C[5,0]*x3), -x2*(C[4,0]*x2-C[5,0]*x3)),
-#            (C[0,0]*x3,            x3*(C[0,4]*x2-C[0,5]*x3),                            C[0,0]*x3**2,              -C[0,0]*x2*x3),
-#            (-C[0,0]*x2,           -x2*(C[0,4]*x2-C[0,5]*x3),                           -C[0,0]*x2*x3,              C[0,0]*x2**2)])
-            
-
-def gamma_h(dx,v,dim):    
+def gamma_h(dx,v,dim):
     aa,b=1,2
     if dim==2:
-        ret_val=as_vector([0,       v[1].dx(aa),  v[2].dx(b)  ,v[1].dx(b)+v[2].dx(aa),   v[0].dx(b),          v[0].dx(aa)])
-        
+        E1=as_vector([0,v[1].dx(aa),v[2].dx(b),v[1].dx(b)+v[2].dx(aa),v[0].dx(b),v[0].dx(aa)])
     elif dim==3:
-        ret_val=as_vector([v[0].dx(0),v[1].dx(aa),v[2].dx(b)  ,v[1].dx(b)+v[2].dx(aa),   v[0].dx(b)+v[b].dx(0),v[0].dx(aa)+v[aa].dx(0)])
-    return ret_val 
+        E1=as_vector([v[0].dx(0),v[1].dx(aa),v[2].dx(b),v[1].dx(b)+v[2].dx(aa),v[0].dx(b)+v[b].dx(0),v[0].dx(aa)+v[aa].dx(0)])
+
+    return E1
+
 
 def gamma_l(v): 
     # e,x required as element can be of left/right boundary or quad mesh
@@ -268,14 +274,145 @@ def dof_mapping_quad(V, v2a, V_l, w_ll, boundary_facets_left, entity_mapl):
         _description_
     """
     dof_S2L = []
-    deg=1
     for i,xx in enumerate(entity_mapl):
         dofs = locate_dofs_topological(V, 2, np.array([xx]))
         dofs_left= locate_dofs_topological(V_l, 2, np.array([boundary_facets_left[i]]))
         
-        for k in range(deg+1):  
+        for k in range(len(dofs)):  
             if dofs[k] not in dof_S2L:
                 dof_S2L.append(dofs[k])
                 for j in range(3):
                     v2a.x.array[3*dofs[k]+j] = w_ll[3*dofs_left[k]+j] # store boundary solution of fluctuating functions
     return v2a
+
+def recov(st):
+    recov=np.zeros((6,6))
+    recov[0,1],recov[0,2]=st[5],-st[4]
+    recov[1,0],recov[1,2]=-st[5],st[3]
+    recov[2,0],recov[2,1]=st[4],-st[3]
+    recov[3:6,3:6]=recov[0:3,0:3]
+    
+    recov[3,1],recov[3,2]=st[2],-st[1]
+    recov[4,0],recov[4,2]=-st[2],st[0]
+    recov[5,0],recov[5,1]=st[1],-st[0]
+    
+    return recov 
+
+def EPS_get_spectrum(
+    EPS: SLEPc.EPS, V: FunctionSpace
+) -> Tuple[List[complex], List[PETSc.Vec], List[PETSc.Vec]]:
+    """Retrieve eigenvalues and eigenfunctions from SLEPc EPS object.
+    Parameters
+    ----------
+    EPS
+       The SLEPc solver
+    V
+       The function space
+    Returns
+    -------
+        Tuple consisting of: List of complex converted eigenvalues,
+         lists of converted eigenvectors (real part) and (imaginary part)
+    """
+    # Get results in lists
+    eigval = list()
+    eigvec_r = list()
+    eigvec_i = list()
+    for i in range(EPS.getConverged()):
+        vr = fem.Function(V)
+        vi = fem.Function(V)
+
+        eigval.append(EPS.getEigenpair(i, vr.x.petsc_vec, vi.x.petsc_vec))
+        eigvec_r.append(vr)
+        eigvec_i.append(vi)  # Sort by increasing magnitude
+    idx = np.argsort(np.abs(np.array(eigval)), axis=0)
+    eigval = [eigval[i] for i in idx]
+    eigvec_r = [eigvec_r[i] for i in idx]
+    eigvec_i = [eigvec_i[i] for i in idx]
+    return (eigval, eigvec_r, eigvec_i)
+
+def solve_GEP_shiftinvert(
+    A: PETSc.Mat,
+    B: PETSc.Mat,
+    problem_type: SLEPc.EPS.ProblemType = SLEPc.EPS.ProblemType.GHIEP,
+    solver: SLEPc.EPS.Type = SLEPc.EPS.Type.KRYLOVSCHUR,
+    nev: int = 10,
+    tol: float = 1e-7,
+    max_it: int = 1000,
+    target: float = 1.0,
+    shift: float = 0.0,
+) -> SLEPc.EPS:
+    """
+     Solve generalized eigenvalue problem A*x=lambda*B*x using shift-and-invert
+     as spectral transform method.
+     Parameters
+     ----------
+     A
+        The matrix A
+     B
+        The matrix B
+     problem_type
+        The problem type, for options see: https://bit.ly/3gM5pth
+    solver:
+        Solver type, for options see: https://bit.ly/35LDcMG
+     nev
+         Number of requested eigenvalues.
+     tol
+        Tolerance for slepc solver
+     max_it
+        Maximum number of iterations.
+     target
+        Target eigenvalue. Also used for sorting.
+     shift
+        Shift 'sigma' used in shift-and-invert.
+     Returns
+     -------
+     EPS
+        The SLEPc solver
+    """
+
+    # Build an Eigenvalue Problem Solver object
+    EPS = SLEPc.EPS()
+    EPS.create(comm=MPI.COMM_WORLD)
+    EPS.setOperators(A, B)
+   # deflation_vector = PETSc.Vec().createSeq(A.getLocalSize())
+   # deflation_vector.set(1.0)
+    #EPS.setDeflationSpace(deflation_vector)
+
+    # Set initial vector (example: random vector)
+   # initial_vector = PETSc.Vec().createSeq(A.getLocalSize())
+   # initial_vector.setRandom()
+  #  EPS.setInitialSpace(initial_vector)
+    EPS.setProblemType(problem_type)
+    # set the number of eigenvalues requested
+    EPS.setDimensions(nev=nev)
+    # Set solver
+    EPS.setType(solver)
+    # set eigenvalues of interest
+    EPS.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_MAGNITUDE)
+    EPS.setTarget(target)  # sorting
+    # set tolerance and max iterations
+    EPS.setTolerances(tol=tol, max_it=max_it)
+    # Set up shift-and-invert
+    # Only work if 'whichEigenpairs' is 'TARGET_XX'
+    ST = EPS.getST()
+    ST.setType(SLEPc.ST.Type.SINVERT)
+    ST.setShift(shift)
+    ST.getKSP().setType("preonly")
+    ST.getKSP().getPC().setType("lu")
+    ST.getKSP().getPC().setFactorSolverType("mumps")
+    EPS.setST(ST)
+    # set monitor
+    it_skip = 1
+    EPS.setMonitor(
+        lambda eps, it, nconv, eig, err: monitor_EPS_short(
+            eps, it, nconv, eig, err, it_skip
+        )
+    )
+    # parse command line options
+    EPS.setFromOptions()
+    # Display all options (including those of ST object)
+    #EPS.view()
+    EPS.solve()
+    return EPS
+    
+        
