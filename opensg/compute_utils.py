@@ -46,7 +46,36 @@ def C(i,frame,material_parameters):  # Stiffness matrix
     CC=as_tensor(np.linalg.inv(S))
     R_sig=Rsig(frame)
     return dot(dot(R_sig,CC),R_sig.T)
-    
+
+def stress_output(mat_param,mesh,stress_3D,points):
+
+    bb_tree = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim)
+    points = np.array(points, dtype=mesh.geometry.x.dtype)
+    potential_colliding_cells = dolfinx.geometry.compute_collisions_points(bb_tree, points)
+    colliding_cells = dolfinx.geometry.compute_colliding_cells(mesh, potential_colliding_cells, points)
+    points_on_proc = []
+    cells = []
+    for i, point in enumerate(points):
+        if len(colliding_cells.links(i)) > 0:
+            points_on_proc.append(point)
+            cells.append(colliding_cells.links(i)[0])
+    points_on_proc = np.array(points_on_proc, dtype=np.float64).reshape(-1, 3)
+    cells = np.array(cells, dtype=np.int32)
+
+    return stress_3D.eval(points_on_proc, cells)
+
+def CC(mat_param):
+    CC=[]
+    for i in range(len(mat_param)):
+        E1,E2,E3,G12,G13,G23,v12,v13,v23= mat_param[i]
+        S=np.zeros((6,6))
+        S[0,0], S[1,1], S[2,2]=1/E1, 1/E2, 1/E3
+        S[0,1], S[0,2]= -v12/E1, -v13/E1
+        S[1,0], S[1,2]= -v12/E1, -v23/E2
+        S[2,0], S[2,1]= -v13/E1, -v23/E2
+        S[3,3], S[4,4], S[5,5]= 1/G23, 1/G13, 1/G12 
+        CC.append(np.linalg.inv(S))  
+    return CC
 def epsilon(u): 
     E1=as_vector([u[0].dx(0),u[1].dx(1),u[2].dx(2),(u[1].dx(2)+u[2].dx(1)),(u[0].dx(2)+u[2].dx(0)),(u[0].dx(1)+u[1].dx(0))])
     return as_tensor([(E1[0],0.5*E1[5],0.5*E1[4]),(0.5*E1[5],E1[1],0.5*E1[3]),(0.5*E1[4],0.5*E1[3],E1[2])]),E1
@@ -59,7 +88,7 @@ def sigma_prestress(i,CC,strain_3D):
     s_pre=dot(as_tensor(CC[i]),strain_3D)
     return as_tensor([(s_pre[0],s_pre[5],s_pre[4]),
                       (s_pre[5],s_pre[1],s_pre[3]),
-                      (s_pre[4],s_pre[3],s_pre[2])])
+                      (s_pre[4],s_pre[3],s_pre[2])]),s_pre
                           
 def mass_boun(x,dx,density,nphases): # Mass matrix
     mu= assemble_scalar(form(sum([density[i]*dx(i) for i in range(nphases)])))
@@ -320,8 +349,8 @@ def EPS_get_spectrum(
     eigvec_r = list()
     eigvec_i = list()
     for i in range(EPS.getConverged()):
-        vr = fem.Function(V)
-        vi = fem.Function(V)
+        vr = dolfinx.fem.Function(V)
+        vi = dolfinx.fem.Function(V)
 
         eigval.append(EPS.getEigenpair(i, vr.x.petsc_vec, vi.x.petsc_vec))
         eigvec_r.append(vr)
@@ -404,12 +433,8 @@ def solve_GEP_shiftinvert(
     ST.getKSP().getPC().setFactorSolverType("mumps")
     EPS.setST(ST)
     # set monitor
-    it_skip = 1
-    EPS.setMonitor(
-        lambda eps, it, nconv, eig, err: monitor_EPS_short(
-            eps, it, nconv, eig, err, it_skip
-        )
-    )
+  #  it_skip = 1
+
     # parse command line options
     EPS.setFromOptions()
     # Display all options (including those of ST object)
