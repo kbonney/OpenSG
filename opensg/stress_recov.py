@@ -37,9 +37,8 @@ def beam_reaction(file_name,num_segment):
     return beam_force
 
 
-
-def recover_local_strain(Deff_srt,beam_force,V0,V1,segment,meshdata):
-    
+def recover_local_strain(timo,beam_force,segment,meshdata):
+    Deff_srt,V0,V1=timo[:]
     V=dolfinx.fem.functionspace(meshdata["mesh"], basix.ufl.element(
         "CG", meshdata["mesh"].topology.cell_name(), 1, shape = (3, )))
     VV=dolfinx.fem.functionspace(meshdata["mesh"], basix.ufl.element(
@@ -100,23 +99,32 @@ def recover_local_strain(Deff_srt,beam_force,V0,V1,segment,meshdata):
     
     return strain_3D    
     
+def local_stress(mat_param,segment_mesh,strain_3D,points):
+     mesh=segment_mesh.meshdata["mesh"]
+     CC_=opensg.CC(mat_param)  
+     
+     V_stiff=dolfinx.fem.functionspace(mesh, basix.ufl.element(
+                 "DG", mesh.topology.cell_name(), 0, shape = (6,6 )))    
+     # UFL Stiffness
+     stiffness=dolfinx.fem.Function(V_stiff)
+     for i,sub in enumerate(segment_mesh.meshdata["subdomains"].values):
+         stiffness.x.array[36*i:36*i+36]=CC_[sub].flatten()  
+     V_stress = dolfinx.fem.functionspace(mesh, basix.ufl.element(
+        "CG", mesh.topology.cell_name(), 1, shape=(6,))) 
+     
+     stress_3D=dolfinx.fem.Function(V_stress)
+     fexpr1 = dolfinx.fem.Expression(stiffness*strain_3D,V_stress.element.interpolation_points(), comm = MPI.COMM_WORLD)
+     stress_3D.interpolate(fexpr1) 
+     stress_eval=opensg.stress_output(mat_param,mesh,stress_3D,points)
+     return stress_eval
+ 
 def eigen_stiffness_matrix(mat_param,segment_mesh,strain_3D, N_eig):
     mesh=segment_mesh.meshdata["mesh"]
     
     dx = ufl.Measure('dx')(domain=mesh, subdomain_data=segment_mesh.meshdata["subdomains"])
 
+    CC=opensg.CC(mat_param)  
     nphases=len(mat_param)
-    CC=[]
-    for i in range(nphases):
-        E1,E2,E3,G12,G13,G23,v12,v13,v23= mat_param[i]
-        S=np.zeros((6,6))
-        S[0,0], S[1,1], S[2,2]=1/E1, 1/E2, 1/E3
-        S[0,1], S[0,2]= -v12/E1, -v13/E1
-        S[1,0], S[1,2]= -v12/E1, -v23/E2
-        S[2,0], S[2,1]= -v13/E1, -v23/E2
-        S[3,3], S[4,4], S[5,5]= 1/G23, 1/G13, 1/G12 
-        CC.append(np.linalg.inv(S))
-        
     V=dolfinx.fem.functionspace(mesh, basix.ufl.element(
             "CG", mesh.topology.cell_name(), 1, shape = (3, )))
     du,u_=ufl.TrialFunction(V), ufl.TestFunction(V)
@@ -133,7 +141,7 @@ def eigen_stiffness_matrix(mat_param,segment_mesh,strain_3D, N_eig):
     K = dolfinx.fem.petsc.assemble_matrix(dolfinx.fem.form(a), bcs=bcs, diagonal=1)
     K.assemble()     
 
-    kgform = -sum([ufl.inner(opensg.sigma_prestress(i,CC,strain_3D),ufl.grad(du).T*ufl.grad(u_))*dx(i) for i in range(nphases)])
+    kgform = -sum([ufl.inner(opensg.sigma_prestress(i,CC,strain_3D)[0],ufl.grad(du).T*ufl.grad(u_))*dx(i) for i in range(nphases)])
     KG = dolfinx.fem.petsc.assemble_matrix(dolfinx.fem.form(kgform), bcs=bcs, diagonal=0)
     KG.assemble()    # epsilon(du) and grad(du) both are same      
     
@@ -143,7 +151,7 @@ def eigen_stiffness_matrix(mat_param,segment_mesh,strain_3D, N_eig):
     problem_type=SLEPc.EPS.ProblemType.GHIEP,
     solver=SLEPc.EPS.Type.KRYLOVSCHUR, 
     nev=N_eig,
-    tol=1e-5,
+    tol=1e-7,
     shift=1e-3,
     )
     # Extract eigenpairs
