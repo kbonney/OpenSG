@@ -212,11 +212,14 @@ class SegmentMesh():
     def _build_boundary_submeshes(self):
         pp = self.mesh.geometry.x
         x_min,x_max=min(pp[:,0]), max(pp[:,0])
-        blade_length=x_max-x_min
         mean=0.5*(x_min+x_max)  # Mid origin for taper segments
+            
+        blade_length=x_max-x_min
+
         self.left_origin,self.right_origin,self.taper_origin=[],[],[]
         self.left_origin.append(float(x_min)/blade_length),self.right_origin.append(float(x_max)/blade_length),self.taper_origin.append(float(mean)/blade_length)
-        pp[:,0]=pp[:,0]-mean
+       # print(float(mean))
+    #    pp[:,0]=pp[:,0]-mean
         
         is_left_boundary, is_right_boundary = opensg.generate_boundary_markers(
             min(pp[:,0]), max(pp[:,0]))
@@ -230,7 +233,7 @@ class SegmentMesh():
             self.mesh, self.fdim, left_facets)
         right_mesh, right_entity_map, right_vertex_map, right_geom_map = dolfinx.mesh.create_submesh(
             self.mesh, self.fdim, right_facets)
-        
+
         self.left_submesh = {
             "mesh": left_mesh, 
             "entity_map": left_entity_map, 
