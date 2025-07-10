@@ -62,7 +62,7 @@ def stress_output(mat_param,mesh,stress_3D,points):
             cells.append(colliding_cells.links(i)[0])
     points_on_proc = np.array(points_on_proc, dtype=np.float64).reshape(-1, 3)
     cells = np.array(cells, dtype=np.int32)
-    print(cells)
+   # print(cells)
     return stress_3D.eval(points_on_proc, cells)
 
 def CC(mat_param):
