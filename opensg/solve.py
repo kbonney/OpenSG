@@ -601,6 +601,8 @@ def compute_stiffness(
     Deff_srt[1:3, 1:3] = G_tim
     Deff_srt[1:3, 3:6] = Y_tim.T[:, 1:4]
     Deff_srt[1:3, 0] = Y_tim.T[:, 0].flatten()
- 
+    print('Tapered Timo Stiffness: VABS Convention')    
+    np.set_printoptions(precision=4) 
+    print(np.around(Deff_srt)) 
     return Deff_srt, V0, V1s 
 
