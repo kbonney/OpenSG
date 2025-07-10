@@ -12,8 +12,8 @@ import opensg
 import basix
 from mpi4py import MPI
 from slepc4py import SLEPc
-
-def beam_reaction(file_name,num_segment):
+    
+def beam_reaction(file_name):
 
     data=np.loadtxt(file_name +'.out', delimiter=',', skiprows=0, dtype=str)
     index=data[1].split()
@@ -21,7 +21,7 @@ def beam_reaction(file_name,num_segment):
     pp=7
     #beam_f=[[[index[pp+k],float(last_data[pp+k])] for k in range(6)]] ;if root also needed
     beam_force=[]
-    #n_seg=segment
+    num_segment=int((len(index)-13)/15)
     pp=13
 
     for seg in range(num_segment):
@@ -33,7 +33,7 @@ def beam_reaction(file_name,num_segment):
             beam_seg_reac.append([index[sc],float(last_data[sc])])
           #  print(f,index[sc])
         beam_force.append(beam_seg_reac)
-        
+          
     return beam_force
 
 
@@ -47,12 +47,14 @@ def recover_local_strain(timo,beam_force,segment,meshdata):
     x,dx = ufl.SpatialCoordinate(meshdata["mesh"]), ufl.Measure('dx')(domain=meshdata["mesh"], subdomain_data=meshdata["subdomains"])
     
     rf=[beam_force[int(segment)][k][1] for k in range(6)]
-
+    for k in range(6):
+        print(beam_force[int(segment)][k][0])          
     FF=np.array((rf[2],rf[0],rf[1],rf[5],rf[3],rf[4])) # BeamDyn --> VABS convention 
-    conv=['F1','F2','F3', 'M1','M2','M3']   
+    conv=['F1','F2','F3', 'M1','M2','M3'] 
+    print('VABS Input Reaction Force')
     for k in range(6):
         print(conv[k], FF[k])
-    
+
     Comp_srt=np.linalg.inv(Deff_srt)
     st=np.matmul(Comp_srt,FF) 
     
@@ -110,7 +112,7 @@ def local_stress(mat_param,segment_mesh,strain_3D,points):
      for i,sub in enumerate(segment_mesh.meshdata["subdomains"].values):
          stiffness.x.array[36*i:36*i+36]=CC_[sub].flatten()  
      V_stress = dolfinx.fem.functionspace(mesh, basix.ufl.element(
-        "CG", mesh.topology.cell_name(), 1, shape=(6,))) 
+        "CG", mesh.topology.cell_name(), 2, shape=(6,))) 
      
      stress_3D=dolfinx.fem.Function(V_stress)
      fexpr1 = dolfinx.fem.Expression(stiffness*strain_3D,V_stress.element.interpolation_points(), comm = MPI.COMM_WORLD)
@@ -138,7 +140,7 @@ def eigen_stiffness_matrix(mat_param,segment_mesh,strain_3D, N_eig):
     # Linear Elasticity Bilinear Form
     a = sum([ufl.dot(opensg.sigma(du,i,CC)[1],opensg.epsilon(u_)[1])*dx(i) for i in range(nphases)])
     # Stiffness matrix
-    K = dolfinx.fem.petsc.assemble_matrix(dolfinx.fem.form(a), bcs=bcs, diagonal=1)
+    K = dolfinx.fem.petsc.assemble_matrix(dolfinx.fem.form(a), bcs=bcs)
     K.assemble()     
 
     kgform = -sum([ufl.inner(opensg.sigma_prestress(i,CC,strain_3D)[0],ufl.grad(du).T*ufl.grad(u_))*dx(i) for i in range(nphases)])
@@ -146,17 +148,55 @@ def eigen_stiffness_matrix(mat_param,segment_mesh,strain_3D, N_eig):
     KG.assemble()    # epsilon(du) and grad(du) both are same      
     
     eigensolver = opensg.solve_GEP_shiftinvert(
+    KG,   # Optimization Problem: Find maximum eigenvalue of this problem
     K,
-    KG,
     problem_type=SLEPc.EPS.ProblemType.GHIEP,
     solver=SLEPc.EPS.Type.KRYLOVSCHUR, 
     nev=N_eig,
-    tol=1e-7,
-    shift=1e-3,
+    tol=1e-8,
+  #  shift=1,
     )
     # Extract eigenpairs
     (eigval, eigvec_r, eigvec_i) = opensg.EPS_get_spectrum(eigensolver, V) 
-    print("Critical Eigen value: ", eigval)
+    print('Critical Eigen val:', 1/(np.max(eigval)).real)
+
+  #  pyvista.start_xvfb()
+  #  pyvista.set_jupyter_backend("static")
+    
+    # Grid for the mesh
+  #  tdim = mesh.topology.dim
+  #  mesh_topology, mesh_cell_types, mesh_geometry = dolfinx.plot.vtk_mesh(mesh, tdim)
+  #  mesh_grid = pyvista.UnstructuredGrid(mesh_topology, mesh_cell_types, mesh_geometry)
+    
+    # Grid for functions (2nd order elements)
+  #  u_topology, u_cell_types, u_geometry = dolfinx.plot.vtk_mesh(V)
+   # u_grid = pyvista.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
+    
+    # Plot the first 3 eigenmodes
+    #pl = pyvista.Plotter(shape=(1, 1))
+    
+   # for i in range(2):
+        #    pl.subplot(1 , 0)
+         #   pl = pyvista.Plotter(shape=(1, 1),off_screen=True)
+         #   eigenmode = f"eigenmode_{i:02}"
+         #   pl.add_text(
+         #       f"Eigenmode {i+1}",
+         #       font_size=12,
+         #   )
+        #    eigen_vector = eigvec_r[i]
+        #    u_grid[eigenmode] = eigen_vector.x.array.reshape(
+        #        u_geometry.shape[0], V.dofmap.index_map_bs
+       #     )
+            #pl.add_mesh(mesh_grid, style="wireframe")
+      #      pl.add_mesh(u_grid.warp_by_vector(eigenmode, factor=10), show_scalar_bar=False)
+      #      pl.view_isometric()
+    
+        
+            # Save the plot as a PNG
+     #       pl.screenshot(f"eigenmode_{i+1:02}.png")
+    #        pl.show() 
+            # Close the plotter to free memory
+    #        pl.close()
     return eigval    
 
     
