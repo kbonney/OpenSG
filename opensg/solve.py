@@ -602,5 +602,5 @@ def compute_stiffness(
     Deff_srt[1:3, 3:6] = Y_tim.T[:, 1:4]
     Deff_srt[1:3, 0] = Y_tim.T[:, 0].flatten()
  
-    return Deff_srt, D_eff, Deff_l, Deff_r
+    return Deff_srt, V0, V1s 
 
