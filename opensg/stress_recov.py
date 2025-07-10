@@ -47,13 +47,15 @@ def recover_local_strain(timo,beam_force,segment,meshdata):
     x,dx = ufl.SpatialCoordinate(meshdata["mesh"]), ufl.Measure('dx')(domain=meshdata["mesh"], subdomain_data=meshdata["subdomains"])
     
     rf=[beam_force[int(segment)][k][1] for k in range(6)]
+    print('Beam reaction Force')
     for k in range(6):
-        print(beam_force[int(segment)][k][0])          
+        print(beam_force[int(segment)][k][0],'     ',beam_force[int(segment)][k][1]  )          
     FF=np.array((rf[2],rf[0],rf[1],rf[5],rf[3],rf[4])) # BeamDyn --> VABS convention 
+
     conv=['F1','F2','F3', 'M1','M2','M3'] 
-    print('VABS Input Reaction Force')
-    for k in range(6):
-        print(conv[k], FF[k])
+    #print('VABS Input Reaction Force')
+    #for k in range(6):
+     #   print(conv[k], FF[k])
 
     Comp_srt=np.linalg.inv(Deff_srt)
     st=np.matmul(Comp_srt,FF) 
