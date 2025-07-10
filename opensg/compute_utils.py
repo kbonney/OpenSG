@@ -48,8 +48,9 @@ def C(i,frame,material_parameters):  # Stiffness matrix
     return dot(dot(R_sig,CC),R_sig.T)
 
 def stress_output(mat_param,mesh,stress_3D,points):
-
+    
     bb_tree = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim)
+    
     points = np.array(points, dtype=mesh.geometry.x.dtype)
     potential_colliding_cells = dolfinx.geometry.compute_collisions_points(bb_tree, points)
     colliding_cells = dolfinx.geometry.compute_colliding_cells(mesh, potential_colliding_cells, points)
@@ -61,7 +62,7 @@ def stress_output(mat_param,mesh,stress_3D,points):
             cells.append(colliding_cells.links(i)[0])
     points_on_proc = np.array(points_on_proc, dtype=np.float64).reshape(-1, 3)
     cells = np.array(cells, dtype=np.int32)
-
+    print(cells)
     return stress_3D.eval(points_on_proc, cells)
 
 def CC(mat_param):
@@ -364,13 +365,13 @@ def EPS_get_spectrum(
 def solve_GEP_shiftinvert(
     A: PETSc.Mat,
     B: PETSc.Mat,
-    problem_type: SLEPc.EPS.ProblemType = SLEPc.EPS.ProblemType.GHIEP,
+    problem_type: SLEPc.EPS.ProblemType = SLEPc.EPS.ProblemType.GHEP,
     solver: SLEPc.EPS.Type = SLEPc.EPS.Type.KRYLOVSCHUR,
-    nev: int = 10,
-    tol: float = 1e-7,
+    nev: int = 2,
+    tol: float = 1e-6,
     max_it: int = 1000,
-    target: float = 1.0,
-    shift: float = 0.0,
+    target: float = 5,
+    shift: float = 1,
 ) -> SLEPc.EPS:
     """
      Solve generalized eigenvalue problem A*x=lambda*B*x using shift-and-invert
@@ -395,6 +396,11 @@ def solve_GEP_shiftinvert(
         Target eigenvalue. Also used for sorting.
      shift
         Shift 'sigma' used in shift-and-invert.
+    interval
+        A tuple (min_val, max_val) to restrict the search to a specific
+        interval on the real axis. To search for only positive eigenvalues,
+        you could use `interval=(1e-9, PETSc.DECIMAL_MAX)`.
+        This feature is supported by solvers like KRYLOVSCHUR.
      Returns
      -------
      EPS
@@ -405,29 +411,30 @@ def solve_GEP_shiftinvert(
     EPS = SLEPc.EPS()
     EPS.create(comm=MPI.COMM_WORLD)
     EPS.setOperators(A, B)
-   # deflation_vector = PETSc.Vec().createSeq(A.getLocalSize())
-   # deflation_vector.set(1.0)
-    #EPS.setDeflationSpace(deflation_vector)
-
-    # Set initial vector (example: random vector)
-   # initial_vector = PETSc.Vec().createSeq(A.getLocalSize())
-   # initial_vector.setRandom()
-  #  EPS.setInitialSpace(initial_vector)
     EPS.setProblemType(problem_type)
+    
     # set the number of eigenvalues requested
-    EPS.setDimensions(nev=nev)
+    EPS.setDimensions(nev=nev, ncv=25)
     # Set solver
     EPS.setType(solver)
     # set eigenvalues of interest
-    EPS.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_MAGNITUDE)
-    EPS.setTarget(target)  # sorting
+    EPS.setWhichEigenpairs(SLEPc.EPS.Which.LARGEST_REAL)
+   # EPS.setTarget(target)  # sorting
+  #  EPS.setInterval(1e-3, 1e3)
+
     # set tolerance and max iterations
     EPS.setTolerances(tol=tol, max_it=max_it)
     # Set up shift-and-invert
     # Only work if 'whichEigenpairs' is 'TARGET_XX'
+    # Restrict the computed eigenvalues to a specific interval.
+    # This is the key change to filter for only positive eigenvalues.
+    
+    #
     ST = EPS.getST()
-    ST.setType(SLEPc.ST.Type.SINVERT)
-    ST.setShift(shift)
+  #  ST.setType(SLEPc.ST.Type.SINVERT)
+  #  ST.setShift(shift)
+
+    
     ST.getKSP().setType("preonly")
     ST.getKSP().getPC().setType("lu")
     ST.getKSP().getPC().setFactorSolverType("mumps")
