@@ -23,6 +23,7 @@ for segment in np.linspace(1,1,1): # np.linspace(start segment, end segment, (en
                                     segment_mesh.meshdata,
                                     segment_mesh.left_submesh,
                                     segment_mesh.right_submesh)
+    
     # Dehomogenization
     strain_3D=opensg.recover_local_strain(timo,beam_force,segment,segment_mesh.meshdata) # Local 3D Strain
     
@@ -33,10 +34,10 @@ for segment in np.linspace(1,1,1): # np.linspace(start segment, end segment, (en
     
     # Local Stress Path (Optional)
     file_name='solid.lp_sparcap_center_thickness_001' 
-    points=np.loadtxt(file_name, delimiter=' ', skiprows=0, dtype=float) # Load path coordinates
+    points=np.loadtxt(file_name, skiprows=0, dtype=float) # Load path coordinates
     eval_data=opensg.local_stress(segment_mesh.material_database[0],segment_mesh, strain_3D,points)
-    for p in range(len(points)):
-        print('Point:',[float(i) for i in points[p].split()],'   Stress Vector:', eval_data[p])
+    for idx,pt in enumerate(points):
+        print(' \n Point:',[float(i) for i in pt],' \n   Stress Vector:', eval_data[idx])
         
     # If it shows error in points that means, no such coordinate points found in the current segment. 
     # Suppress Local Stress Path- it is under working and needs validation
