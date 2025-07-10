@@ -1,18 +1,15 @@
 import opensg
 import numpy as np
 import time
+file_name='bar_urc_npl_2_ar_10-segment_'
+beam_force=opensg.beam_reaction(file_name)
 
-taper_timo,left_timo,right_timo=[],[],[]
-ar_time=[]
-total_segments=28
-beam_force=opensg.beam_reaction('bar_urc_npl_2_ar_10-segment_',total_segments)
-
-for segment in np.linspace(0,0,1):
+for segment in np.linspace(1,1,1): # np.linspace(start segment, end segment, (end_segment-start segment+1))
 
     tic = time.time() 
     print("\n Computing Segment:",str(int(segment))," \n")
 
-    file_name='bar_urc_npl_2_ar_10-segment_'
+    # read yaml mesh
     mesh_yaml = file_name+ str(int(segment)) +'.yaml'  ## the name of the yaml file containing the whole blade mesh
     mesh_data = opensg.load_yaml(mesh_yaml)
   
@@ -27,16 +24,21 @@ for segment in np.linspace(0,0,1):
                                     segment_mesh.left_submesh,
                                     segment_mesh.right_submesh)
     # Dehomogenization
-    strain_3D=opensg.recover_local_strain(timo,beam_force,segment,segment_mesh.meshdata) # Local Strain
-
-    # Local Stress Path 
+    strain_3D=opensg.recover_local_strain(timo,beam_force,segment,segment_mesh.meshdata) # Local 3D Strain
+    
+    # Eigen Solver
+    eigen= opensg.eigen_stiffness_matrix(segment_mesh.material_database[0],segment_mesh,strain_3D, 1)
+    
+    # Note:segment_mesh.material_database[1] contains densities- to be used for mass matrix computaion (found in compute_utils).
+    
+    # Local Stress Path (Optional)
     file_name='solid.lp_sparcap_center_thickness_001' 
     points=np.loadtxt(file_name, delimiter=' ', skiprows=0, dtype=float) # Load path coordinates
     eval_data=opensg.local_stress(segment_mesh.material_database[0],segment_mesh, strain_3D,points)
     for p in range(len(points)):
         print('Point:',[float(i) for i in points[p].split()],'   Stress Vector:', eval_data[p])
-      
-    # Eigen Solver
-    eigen= opensg.eigen_stiffness_matrix(segment_mesh.material_database[0],segment_mesh,strain_3D, 2)
-
+        
+    # If it shows error in points that means, no such coordinate points found in the current segment. 
+    # Suppress Local Stress Path- it is under working and needs validation
+    
     print('\n Total Time for Segment',str(int(segment)),' :',time.time()-tic)
